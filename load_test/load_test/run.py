@@ -119,6 +119,15 @@ def _percentile(values: List[float], p: float) -> float:
 
 
 def load_config(path: str) -> Dict[str, Any]:
+    # Allow running from repo root while pointing at config files in `load_test/`.
+    # Example: `python -m load_test.clear_db --config config.yaml`
+    # will fall back to `load_test/config.yaml` if needed.
+    if not os.path.isabs(path) and not os.path.exists(path):
+        load_test_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+        fallback = os.path.join(load_test_dir, path)
+        if os.path.exists(fallback):
+            path = fallback
+
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
