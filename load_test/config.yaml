@@ -3,6 +3,9 @@ mongodb:
   database: "compress_poc"
   collection: "synthetic"
   # PyMongo compression options:
+  # - Supported: "snappy", "zlib", "zstd" (depending on your client build/libs)
+  # - Use [] or null to disable compression
+  # - POC note: leaving ["snappy"] will DISABLE compression (acts like [])
   # - "snappy" requires python-snappy
   compressors: ["snappy"]
   zlib_compression_level: null
@@ -11,7 +14,7 @@ ingest:
   # Target total bytes of BSON to insert (approx). 200 MiB default.
   target_bytes: 209715200
   # Threads doing inserts concurrently.
-  threads: 4
+  threads: 1
   # Insert batch size per insert_many call.
   batch_size: 1000
   # If true, drop the collection before ingest.

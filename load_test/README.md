@@ -31,6 +31,20 @@ python -m load_test --config config.yaml
 
 Results are written to `metrics.output_path` (default `results.json`).
 
+## Clear ingested data
+
+Delete all documents from the configured collection:
+
+```bash
+python -m load_test.clear_db --config config.yaml
+```
+
+Or drop the collection entirely:
+
+```bash
+python -m load_test.clear_db --config config.yaml --drop
+```
+
 ## Notes
 
 - Init scripts run only when `../db/` is empty. This load test does *not* require re-init; it can drop just the target collection if configured.

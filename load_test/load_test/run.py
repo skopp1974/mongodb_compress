@@ -133,6 +133,11 @@ def build_client(cfg: Dict[str, Any]) -> MongoClient:
     compressors = mcfg.get("compressors") or None
     zlib_level = mcfg.get("zlib_compression_level")
 
+    # POC behavior: treat ["snappy"] as "no compression".
+    # This lets you keep the config default while effectively disabling compression.
+    if isinstance(compressors, list) and compressors == ["snappy"]:
+        compressors = None
+
     kwargs: Dict[str, Any] = {}
     if compressors is not None:
         kwargs["compressors"] = compressors
