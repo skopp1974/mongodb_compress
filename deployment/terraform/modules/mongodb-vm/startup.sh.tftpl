@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MONGO_MAJOR="${mongodb_major_version}"
+BIND_IP="${bind_ip}"
+ENABLE_AUTH="${enable_auth}"
+ADMIN_USER="${admin_username}"
+ADMIN_PASS="${admin_password}"
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL "https://pgp.mongodb.com/server-${MONGO_MAJOR}.asc" | gpg --dearmor -o /etc/apt/keyrings/mongodb-server.gpg
+chmod 0644 /etc/apt/keyrings/mongodb-server.gpg
+
+CODENAME="$(lsb_release -sc)"
+echo "deb [ arch=amd64,arm64 signed-by=/etc/apt/keyrings/mongodb-server.gpg ] https://repo.mongodb.org/apt/ubuntu ${CODENAME}/mongodb-org/${MONGO_MAJOR} multiverse" > /etc/apt/sources.list.d/mongodb-org.list
+
+apt-get update -y
+apt-get install -y mongodb-org
+
+cat >/etc/mongod.conf <<EOF
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+storage:
+  dbPath: /var/lib/mongodb
+  journal:
+    enabled: true
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+net:
+  port: 27017
+  bindIp: ${BIND_IP}
+EOF
+
+systemctl daemon-reload
+systemctl enable mongod
+systemctl restart mongod
+
+if [[ "${ENABLE_AUTH}" == "true" ]]; then
+  cat >/usr/local/sbin/mongo-init-admin.sh <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ADMIN_USER="${ADMIN_USER:?}"
+ADMIN_PASS="${ADMIN_PASS:?}"
+
+tries=60
+until mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' >/dev/null 2>&1; do
+  tries=$((tries - 1))
+  if [[ $tries -le 0 ]]; then
+    echo "mongod did not become ready" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+mongosh --quiet --eval "db.getSiblingDB('admin').createUser({user: '${ADMIN_USER}', pwd: '${ADMIN_PASS}', roles: [ { role: 'root', db: 'admin' } ] })"
+
+cat >>/etc/mongod.conf <<EOF
+security:
+  authorization: enabled
+EOF
+
+systemctl restart mongod
+EOS
+
+  chmod 0750 /usr/local/sbin/mongo-init-admin.sh
+  ADMIN_USER="${ADMIN_USER}" ADMIN_PASS="${ADMIN_PASS}" /usr/local/sbin/mongo-init-admin.sh || true
+fi
+
