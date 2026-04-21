@@ -42,16 +42,30 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 
+has_docker_group="no"
+if id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
+  has_docker_group="yes"
+fi
+
 cat <<'EOF'
 Docker installed.
 
 Next steps:
-  1) Close this terminal and open a new one (or log out/in) so the docker group applies.
+  1) Apply docker group in this shell:
+       newgrp docker
+     If that doesn't work, close this terminal and open a new one (or log out/in).
+
   2) Verify:
        docker version
        docker compose version
+
   3) Start MongoDB:
        cd ~/repos/mongodb_compress/deployment
        docker compose up -d
 EOF
+
+if [[ "${has_docker_group}" != "yes" ]]; then
+  echo ""
+  echo "Note: your current shell does not have docker group yet. Run: newgrp docker"
+fi
 
