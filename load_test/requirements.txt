@@ -1,0 +1,5 @@
+pymongo>=4.7
+PyYAML>=6.0
+psutil>=5.9
+python-snappy>=0.7
+

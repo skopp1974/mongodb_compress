@@ -1,0 +1,36 @@
+mongodb:
+  uri: "mongodb://localhost:27017"
+  database: "compress_poc"
+  collection: "synthetic"
+  # PyMongo compression options:
+  # - "snappy" requires python-snappy
+  compressors: ["snappy"]
+  zlib_compression_level: null
+
+ingest:
+  # Target total bytes of BSON to insert (approx). 200 MiB default.
+  target_bytes: 209715200
+  # Threads doing inserts concurrently.
+  threads: 4
+  # Insert batch size per insert_many call.
+  batch_size: 1000
+  # If true, drop the collection before ingest.
+  drop_collection_first: true
+  # Write concern (ack level). For POC/perf testing you may set 0.
+  w: 1
+  journal: true
+
+document:
+  # Minimum fields per document (script will create field_000..field_099 plus a few extra).
+  min_fields: 100
+  # Approx payload size control: each doc will have a string blob of this length.
+  blob_chars: 1024
+  # Random seed for reproducibility (null = nondeterministic).
+  seed: 12345
+
+metrics:
+  # Sampling interval for CPU/memory metrics during ingestion.
+  sample_interval_ms: 200
+  # Where to write results json.
+  output_path: "results.json"
+

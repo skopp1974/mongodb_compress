@@ -1,2 +1,4 @@
 db/
+load_test/results.json
+.venv/
 
