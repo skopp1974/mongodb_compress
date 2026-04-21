@@ -17,6 +17,13 @@ docker compose up -d
 
 MongoDB will be reachable at `mongodb://localhost:27017`.
 
+## Initialized database
+
+On first startup (when `../db/` is empty), the container runs `deployment/initdb/01-create-compress-poc.js` and creates:
+
+- database: `compress_poc`
+- collection: `init`
+
 ## Start MongoDB (with auth)
 
 ```bash
@@ -45,7 +52,7 @@ docker compose down
 
 ## Uninstall / wipe all data
 
-Warning: this deletes all MongoDB data stored by Docker volumes.
+Warning: this deletes all MongoDB data stored under `../db/`.
 
 ```bash
 docker compose down -v
