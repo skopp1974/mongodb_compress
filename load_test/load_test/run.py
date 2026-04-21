@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+import sys
 import string
 import threading
 import time
@@ -137,15 +138,41 @@ def _resolve_output_path(config_path: str, output_path: str) -> str:
     return os.path.normpath(os.path.join(os.path.dirname(config_path), output_path))
 
 
-def build_client(cfg: Dict[str, Any]) -> MongoClient:
+def _normalize_compressors(
+    compressors: Any, *, treat_snappy_as_none: bool
+) -> Optional[List[str]]:
+    if compressors is None:
+        return None
+    if compressors == []:
+        return None
+    if isinstance(compressors, str):
+        compressors = [compressors]
+    if not isinstance(compressors, list):
+        return None
+    compressors = [str(x) for x in compressors]
+    if treat_snappy_as_none and compressors == ["snappy"]:
+        return None
+    return compressors
+
+
+def build_client(
+    cfg: Dict[str, Any],
+    *,
+    compressors_override: Optional[List[str]] = None,
+    treat_snappy_as_none: bool = True,
+) -> MongoClient:
     mcfg = cfg["mongodb"]
-    compressors = mcfg.get("compressors") or None
+    compressors = (
+        compressors_override
+        if compressors_override is not None
+        else mcfg.get("compressors")
+    )
     zlib_level = mcfg.get("zlib_compression_level")
 
-    # POC behavior: treat ["snappy"] as "no compression".
-    # This lets you keep the config default while effectively disabling compression.
-    if isinstance(compressors, list) and compressors == ["snappy"]:
-        compressors = None
+    # POC behavior: allow treating ["snappy"] as "no compression".
+    compressors = _normalize_compressors(
+        compressors, treat_snappy_as_none=treat_snappy_as_none
+    )
 
     kwargs: Dict[str, Any] = {}
     if compressors is not None:
@@ -163,6 +190,34 @@ def _make_collection(cfg: Dict[str, Any], client: MongoClient):
     journal = icfg.get("journal", True)
     wc = WriteConcern(w=w, j=journal)
     return client.get_database(mcfg["database"]).get_collection(mcfg["collection"], write_concern=wc)
+
+
+def _recreate_collection_with_block_compressor(
+    cfg: Dict[str, Any],
+    client: MongoClient,
+    *,
+    block_compressor: Optional[str],
+) -> None:
+    mcfg = cfg["mongodb"]
+    db = client.get_database(mcfg["database"])
+    name = mcfg["collection"]
+
+    try:
+        db.drop_collection(name)
+    except Exception:
+        pass
+
+    if not block_compressor:
+        db.create_collection(name)
+        return
+
+    # WiredTiger configString expects values like: block_compressor=zstd|snappy|zlib|none
+    db.create_collection(
+        name,
+        storageEngine={
+            "wiredTiger": {"configString": f"block_compressor={block_compressor}"}
+        },
+    )
 
 
 def _make_batches(
@@ -205,6 +260,293 @@ def _insert_worker(coll, batches: List[List[Dict[str, Any]]]) -> Tuple[int, int,
     return docs, batches_done, (t1 - t0) // 1_000_000
 
 
+@dataclass
+class ProgressState:
+    total_batches: int
+    total_docs: int
+    total_bytes_est: int
+    lock: threading.Lock
+    done_batches: int = 0
+    done_docs: int = 0
+    done_bytes_est: int = 0
+
+
+class ProgressPrinter:
+    def __init__(self, state: ProgressState, interval_s: float = 1.0) -> None:
+        self._state = state
+        self._interval_s = max(interval_s, 0.2)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._state.lock:
+                b = self._state.done_batches
+                d = self._state.done_docs
+                by = self._state.done_bytes_est
+                tb = self._state.total_batches
+                td = self._state.total_docs
+                tby = self._state.total_bytes_est
+
+            pct = (100.0 * b / tb) if tb else 0.0
+            mb = by / (1024.0 * 1024.0)
+            tmb = tby / (1024.0 * 1024.0)
+            sys.stderr.write(
+                f"\rProgress: {pct:6.2f}%  batches {b}/{tb}  docs {d}/{td}  est {mb:,.1f}/{tmb:,.1f} MiB"
+            )
+            sys.stderr.flush()
+            time.sleep(self._interval_s)
+
+
+def _insert_worker_with_progress(
+    coll, batches: List[List[Dict[str, Any]]], progress: ProgressState
+) -> Tuple[int, int, int]:
+    t0 = time.perf_counter_ns()
+    docs_flush = 0
+    bytes_flush = 0
+    batches_done = 0
+
+    for batch in batches:
+        coll.insert_many(batch, ordered=False)
+        batches_done += 1
+        docs_flush += len(batch)
+        bytes_flush += sum(estimate_bson_size(doc) for doc in batch)
+
+        if batches_done % 5 == 0:
+            with progress.lock:
+                progress.done_batches += 5
+                progress.done_docs += docs_flush
+                progress.done_bytes_est += bytes_flush
+            docs_flush = 0
+            bytes_flush = 0
+
+    remainder = batches_done % 5
+    if remainder or docs_flush or bytes_flush:
+        with progress.lock:
+            progress.done_batches += remainder
+            progress.done_docs += docs_flush
+            progress.done_bytes_est += bytes_flush
+
+    t1 = time.perf_counter_ns()
+    return docs_flush, batches_done, (t1 - t0) // 1_000_000
+
+
+def _run_phase(
+    *,
+    cfg: Dict[str, Any],
+    batches: List[List[Dict[str, Any]]],
+    docs_total: int,
+    bytes_total_est: int,
+    threads: int,
+    phase_name: str,
+    compressors_override: Optional[List[str]],
+    treat_snappy_as_none: bool,
+) -> Dict[str, Any]:
+    icfg = cfg["ingest"]
+    mcfg = cfg["metrics"]
+
+    client = build_client(
+        cfg,
+        compressors_override=compressors_override,
+        treat_snappy_as_none=treat_snappy_as_none,
+    )
+
+    mdb_cfg = cfg.get("mongodb", {})
+    recreate_each_phase = bool(mdb_cfg.get("recreate_collection_each_phase", False))
+    if recreate_each_phase:
+        _recreate_collection_with_block_compressor(
+            cfg,
+            client,
+            block_compressor=mdb_cfg.get(
+                "storage_block_compressor_for_compression_run"
+                if phase_name == "compression"
+                else "storage_block_compressor_for_no_compression_run"
+            ),
+        )
+
+    coll = _make_collection(cfg, client)
+
+    worker_batches: List[List[List[Dict[str, Any]]]] = [[] for _ in range(max(threads, 1))]
+    for idx, b in enumerate(batches):
+        worker_batches[idx % len(worker_batches)].append(b)
+
+    progress = ProgressState(
+        total_batches=len(batches),
+        total_docs=docs_total,
+        total_bytes_est=bytes_total_est,
+        lock=threading.Lock(),
+    )
+    progress_printer = ProgressPrinter(progress, interval_s=1.0)
+
+    sampler = MetricsSampler(sample_interval_ms=int(mcfg.get("sample_interval_ms", 200)))
+    sampler.start()
+    progress_printer.start()
+
+    start_ms = _now_ms()
+    t0 = time.perf_counter_ns()
+
+    results: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(threads, 1)) as ex:
+        futs = [
+            ex.submit(_insert_worker_with_progress, coll, wb, progress)
+            for wb in worker_batches
+            if wb
+        ]
+        for f in as_completed(futs):
+            docs, batches_done, elapsed_ms = f.result()
+            results.append({"docs": docs, "batches": batches_done, "elapsed_ms": elapsed_ms})
+
+    t1 = time.perf_counter_ns()
+    end_ms = _now_ms()
+    progress_printer.stop()
+    sampler.stop()
+
+    elapsed_ms_total = (t1 - t0) // 1_000_000
+
+    footprint = _get_collection_footprint_bytes(coll)
+
+    return {
+        "phase": phase_name,
+        "mongodb": {
+            "uri": cfg["mongodb"]["uri"],
+            "database": cfg["mongodb"]["database"],
+            "collection": cfg["mongodb"]["collection"],
+            "compressors_effective": compressors_override,
+            "storage_block_compressor_effective": (
+                mdb_cfg.get("storage_block_compressor_for_compression_run")
+                if phase_name == "compression"
+                else mdb_cfg.get("storage_block_compressor_for_no_compression_run")
+            )
+            if recreate_each_phase
+            else None,
+        },
+        "mongo_footprint": footprint,
+        "ingest": {
+            "threads": threads,
+            "batch_size": int(icfg.get("batch_size", 1000)),
+            "target_bytes_requested": int(icfg.get("target_bytes", 209_715_200)),
+            "bytes_generated_estimate": bytes_total_est,
+            "docs_generated": docs_total,
+        },
+        "timing": {
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "elapsed_ms": elapsed_ms_total,
+            "docs_per_sec": (docs_total / (elapsed_ms_total / 1000.0)) if elapsed_ms_total else None,
+            "mb_per_sec_estimate": ((bytes_total_est / (1024.0 * 1024.0)) / (elapsed_ms_total / 1000.0)) if elapsed_ms_total else None,
+        },
+        "workers": results,
+        "process_metrics": sampler.summary(),
+    }
+
+
+def _get_collection_footprint_bytes(coll) -> Dict[str, Optional[int]]:
+    # MongoDB footprint is about storage engine data/index size on disk.
+    # Driver wire-compression (snappy/zlib/zstd) generally does NOT change this number.
+    # WiredTiger block compression DOES change it, but only if the collection is created that way.
+    try:
+        stats = coll.database.command("collStats", coll.name)
+    except Exception:
+        return {
+            "count": None,
+            "size_bytes": None,
+            "storage_size_bytes": None,
+            "total_index_size_bytes": None,
+        }
+
+    total_index_size = stats.get("totalIndexSize")
+    return {
+        "count": int(stats["count"]) if "count" in stats else None,
+        "size_bytes": int(stats["size"]) if "size" in stats else None,
+        "storage_size_bytes": int(stats["storageSize"]) if "storageSize" in stats else None,
+        "total_index_size_bytes": int(total_index_size) if total_index_size is not None else None,
+    }
+
+
+def _compare_results(phase1: Dict[str, Any], phase2: Dict[str, Any]) -> Dict[str, Any]:
+    def _get(obj: Dict[str, Any], path: List[str]) -> Optional[float]:
+        cur: Any = obj
+        for p in path:
+            if not isinstance(cur, dict) or p not in cur:
+                return None
+            cur = cur[p]
+        if cur is None:
+            return None
+        try:
+            return float(cur)
+        except Exception:
+            return None
+
+    def _delta(a: Optional[float], b: Optional[float]) -> Dict[str, Optional[float]]:
+        if a is None or b is None:
+            return {"phase1": a, "phase2": b, "abs": None, "pct": None}
+        abs_d = b - a
+        pct = (abs_d / a) * 100.0 if a != 0 else None
+        return {"phase1": a, "phase2": b, "abs": abs_d, "pct": pct}
+
+    storage_phase1 = _get(phase1, ["mongo_footprint", "storage_size_bytes"])
+    storage_phase2 = _get(phase2, ["mongo_footprint", "storage_size_bytes"])
+    storage_gain_bytes = (storage_phase2 - storage_phase1) if (storage_phase1 is not None and storage_phase2 is not None) else None
+    storage_gain_pct_vs_no_compression = (
+        (storage_gain_bytes / storage_phase2) * 100.0
+        if (storage_gain_bytes is not None and storage_phase2 not in (None, 0))
+        else None
+    )
+
+    return {
+        "phase": "compare",
+        "compare": {
+            "elapsed_ms": _delta(
+                _get(phase1, ["timing", "elapsed_ms"]),
+                _get(phase2, ["timing", "elapsed_ms"]),
+            ),
+            "docs_per_sec": _delta(
+                _get(phase1, ["timing", "docs_per_sec"]),
+                _get(phase2, ["timing", "docs_per_sec"]),
+            ),
+            "mb_per_sec_estimate": _delta(
+                _get(phase1, ["timing", "mb_per_sec_estimate"]),
+                _get(phase2, ["timing", "mb_per_sec_estimate"]),
+            ),
+            "cpu_percent_p95": _delta(
+                _get(phase1, ["process_metrics", "cpu_percent_p95"]),
+                _get(phase2, ["process_metrics", "cpu_percent_p95"]),
+            ),
+            "cpu_percent_max": _delta(
+                _get(phase1, ["process_metrics", "cpu_percent_max"]),
+                _get(phase2, ["process_metrics", "cpu_percent_max"]),
+            ),
+            "rss_bytes_p95": _delta(
+                _get(phase1, ["process_metrics", "rss_bytes_p95"]),
+                _get(phase2, ["process_metrics", "rss_bytes_p95"]),
+            ),
+            "rss_bytes_max": _delta(
+                _get(phase1, ["process_metrics", "rss_bytes_max"]),
+                _get(phase2, ["process_metrics", "rss_bytes_max"]),
+            ),
+            "mongo_storage_size_bytes": _delta(
+                _get(phase1, ["mongo_footprint", "storage_size_bytes"]),
+                _get(phase2, ["mongo_footprint", "storage_size_bytes"]),
+            ),
+            "mongo_total_index_size_bytes": _delta(
+                _get(phase1, ["mongo_footprint", "total_index_size_bytes"]),
+                _get(phase2, ["mongo_footprint", "total_index_size_bytes"]),
+            ),
+            # Convenience: positive means "compression used less disk than no compression".
+            "mongo_storage_gain_bytes": storage_gain_bytes,
+            "mongo_storage_gain_pct_vs_no_compression": storage_gain_pct_vs_no_compression,
+        },
+    }
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to YAML config.")
@@ -219,6 +561,7 @@ def main() -> int:
     threads = int(icfg.get("threads", 1))
     batch_size = int(icfg.get("batch_size", 1000))
     target_bytes = int(icfg.get("target_bytes", 209_715_200))
+    run_comparison = bool(icfg.get("run_comparison", True))
 
     seed = dcfg.get("seed")
     rng = random.Random(seed) if seed is not None else random.Random()
@@ -231,75 +574,67 @@ def main() -> int:
         batch_size=batch_size,
     )
 
-    client = build_client(cfg)
-    coll = _make_collection(cfg, client)
-
     if bool(icfg.get("drop_collection_first", False)):
-        coll.drop()
+        client0 = build_client(cfg, compressors_override=None, treat_snappy_as_none=True)
+        coll0 = _make_collection(cfg, client0)
+        coll0.drop()
 
-    # Split batches across workers (roughly evenly).
-    worker_batches: List[List[List[Dict[str, Any]]]] = [[] for _ in range(max(threads, 1))]
-    for idx, b in enumerate(batches):
-        worker_batches[idx % len(worker_batches)].append(b)
+    mdb = cfg["mongodb"]
+    phase1_compressors = _normalize_compressors(
+        mdb.get("compressors"), treat_snappy_as_none=True
+    )
 
-    sampler = MetricsSampler(sample_interval_ms=int(mcfg.get("sample_interval_ms", 200)))
-    sampler.start()
+    results_array: List[Dict[str, Any]] = []
+    if run_comparison:
+        phase1 = _run_phase(
+            cfg=cfg,
+            batches=batches,
+            docs_total=docs_total,
+            bytes_total_est=bytes_total,
+            threads=threads,
+            phase_name="compression",
+            compressors_override=phase1_compressors,
+            treat_snappy_as_none=False,
+        )
+        results_array.append(phase1)
 
-    start_ms = _now_ms()
-    t0 = time.perf_counter_ns()
+        client_purge = build_client(cfg, compressors_override=None, treat_snappy_as_none=True)
+        coll_purge = _make_collection(cfg, client_purge)
+        coll_purge.drop()
 
-    results: List[Dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(threads, 1)) as ex:
-        futs = [ex.submit(_insert_worker, coll, wb) for wb in worker_batches if wb]
-        for f in as_completed(futs):
-            docs, batches_done, elapsed_ms = f.result()
-            results.append(
-                {"docs": docs, "batches": batches_done, "elapsed_ms": elapsed_ms}
+        phase2 = _run_phase(
+            cfg=cfg,
+            batches=batches,
+            docs_total=docs_total,
+            bytes_total_est=bytes_total,
+            threads=threads,
+            phase_name="no_compression",
+            compressors_override=None,
+            treat_snappy_as_none=True,
+        )
+        results_array.append(phase2)
+        results_array.append(_compare_results(phase1, phase2))
+    else:
+        results_array.append(
+            _run_phase(
+                cfg=cfg,
+                batches=batches,
+                docs_total=docs_total,
+                bytes_total_est=bytes_total,
+                threads=threads,
+                phase_name="single_run",
+                compressors_override=phase1_compressors,
+                treat_snappy_as_none=True,
             )
-
-    t1 = time.perf_counter_ns()
-    end_ms = _now_ms()
-    sampler.stop()
-
-    elapsed_ms_total = (t1 - t0) // 1_000_000
-    docs_done = sum(r["docs"] for r in results)
-
-    out = {
-        "config_path": args.config,
-        "mongodb": {
-            "uri": cfg["mongodb"]["uri"],
-            "database": cfg["mongodb"]["database"],
-            "collection": cfg["mongodb"]["collection"],
-            "compressors": cfg["mongodb"].get("compressors"),
-        },
-        "ingest": {
-            "threads": threads,
-            "batch_size": batch_size,
-            "target_bytes_requested": target_bytes,
-            "bytes_generated_estimate": bytes_total,
-            "docs_generated": docs_total,
-            "docs_inserted": docs_done,
-        },
-        "timing": {
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "elapsed_ms": elapsed_ms_total,
-            "docs_per_sec": (docs_done / (elapsed_ms_total / 1000.0)) if elapsed_ms_total else None,
-            "mb_per_sec_estimate": ((bytes_total / (1024.0 * 1024.0)) / (elapsed_ms_total / 1000.0)) if elapsed_ms_total else None,
-        },
-        "workers": results,
-        "process_metrics": sampler.summary(),
-    }
+        )
 
     output_path = _resolve_output_path(
         args.config, str(mcfg.get("output_path", "results.json"))
     )
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, sort_keys=True)
+        json.dump({"config_path": args.config, "results": results_array}, f, indent=2, sort_keys=True)
         f.write("\n")
 
-    print(json.dumps(out["timing"], indent=2, sort_keys=True))
-    print(json.dumps(out["process_metrics"], indent=2, sort_keys=True))
     print(f"Wrote: {output_path}")
 
     return 0

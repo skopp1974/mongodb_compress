@@ -2,12 +2,17 @@ mongodb:
   uri: "mongodb://localhost:27017"
   database: "compress_poc"
   collection: "synthetic"
-  # PyMongo compression options:
-  # - Supported: "snappy", "zlib", "zstd" (depending on your client build/libs)
-  # - Use [] or null to disable compression
-  # - POC note: leaving ["snappy"] will DISABLE compression (acts like [])
-  # - "snappy" requires python-snappy
-  compressors: ["snappy"]
+  # Storage footprint comparison (recommended):
+  # This compares MongoDB's on-disk storage by creating the collection with a specific
+  # WiredTiger block compressor per phase.
+  #
+  # Supported values (typical): "snappy", "zstd", "zlib", "none"
+  storage_block_compressor_for_compression_run: "zstd"
+  storage_block_compressor_for_no_compression_run: "none"
+  recreate_collection_each_phase: true
+  #
+  # Optional: PyMongo wire-compression (affects network, usually not disk footprint):
+  compressors: []
   zlib_compression_level: null
 
 ingest:
@@ -19,6 +24,8 @@ ingest:
   batch_size: 1000
   # If true, drop the collection before ingest.
   drop_collection_first: true
+  # If true, run phase1 (compression), purge, then phase2 (no compression) and compare.
+  run_comparison: true
   # Write concern (ack level). For POC/perf testing you may set 0.
   w: 1
   journal: true
