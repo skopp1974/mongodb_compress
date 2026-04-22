@@ -1,60 +1,12 @@
-# Local MongoDB (Docker) POC
+# Deployment (Docker)
 
-This is the simplest way to run MongoDB locally on a Chromebook / Linux machine.
+The full installation, runbook, results interpretation, and cleanup guide lives in the repo root:
 
-## Prereqs
+- `../README.md`
 
-- Docker
-- Docker Compose (either `docker compose` plugin or `docker-compose`)
+This folder contains:
 
-## Start MongoDB (no auth)
-
-From `mongodb_compress/deployment`:
-
-```bash
-docker compose up -d
-```
-
-MongoDB will be reachable at `mongodb://localhost:27017`.
-
-## Initialized database
-
-On first startup (when `../db/` is empty), the container runs `deployment/initdb/01-create-compress-poc.js` and creates:
-
-- database: `compress_poc`
-- collection: `init`
-
-## Start MongoDB (with auth)
-
-```bash
-cp .env.example .env
-# edit .env and set a strong password
-docker compose up -d
-```
-
-Connect with:
-
-```bash
-mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:27017/admin"
-```
-
-## View logs
-
-```bash
-docker compose logs -f mongodb
-```
-
-## Stop
-
-```bash
-docker compose down
-```
-
-## Uninstall / wipe all data
-
-Warning: this deletes all MongoDB data stored under `../db/`.
-
-```bash
-docker compose down -v
-```
-
+- `docker-compose.yml` (local MongoDB)
+- `init_mongo_docker.sh` (clean reset: `docker compose down` + wipe `../db/*` + `up -d`)
+- `install_doccker.sh` (install Docker on Debian/Ubuntu / typical Chromebook Linux)
+- `initdb/` (optional first-boot init scripts when `../db/` is empty)

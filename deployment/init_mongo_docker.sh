@@ -23,7 +23,7 @@ Run the load test:
   cd ~/repos/mongodb_compress
   source .venv/bin/activate
   cp -n load_test/config.example.yaml load_test/config.yaml
-  python -m load_test --config config.yaml
+  python -m load_test --config load_test/config.yaml
 
 EOF
 
