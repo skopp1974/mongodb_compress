@@ -41,7 +41,7 @@ The output file has this shape:
 
 - **`config_path`**: the config file path you passed on the command line.
 - **`results`**: array of 3 objects:
-  - **`results[0]`**: phase `"compression"` (uses `mongodb.compressors_for_compression_run`)
+  - **`results[0]`**: phase `"compression"` (uses storage block compressor + optional `mongodb.network_payload_compressors_for_compression_run`)
   - **`results[1]`**: phase `"no_compression"` (forces *no* wire compression)
   - **`results[2]`**: phase `"compare"` (delta between phase 1 and 2)
 
@@ -53,6 +53,7 @@ The output file has this shape:
   - **`compressors_effective`**:
     - list (e.g. `["snappy"]`) means wire compression requested
     - `null` means no compression was used
+    - note: in two-phase mode, phase `"no_compression"` always forces this to `null`
 - **`ingest`**
   - **`threads`**: number of concurrent ingest worker threads.
   - **`batch_size`**: documents per `insert_many`.

@@ -12,8 +12,10 @@ mongodb:
   recreate_collection_each_phase: true
   #
   # Optional: PyMongo wire-compression (affects network, usually not disk footprint):
-  compressors: []
-  zlib_compression_level: null
+  # Supported: ["snappy"], ["zlib"], ["zstd"] (depending on your client build/libs)
+  network_payload_compressors_for_compression_run: ["snappy"]
+  network_payload_compressors_for_no_compression_run: []
+  zlib_compression_level: 9
 
 ingest:
   # Target total bytes of BSON to insert (approx). 200 MiB default.

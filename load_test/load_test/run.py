@@ -139,7 +139,7 @@ def _resolve_output_path(config_path: str, output_path: str) -> str:
 
 
 def _normalize_compressors(
-    compressors: Any, *, treat_snappy_as_none: bool
+    compressors: Any,
 ) -> Optional[List[str]]:
     if compressors is None:
         return None
@@ -150,8 +150,6 @@ def _normalize_compressors(
     if not isinstance(compressors, list):
         return None
     compressors = [str(x) for x in compressors]
-    if treat_snappy_as_none and compressors == ["snappy"]:
-        return None
     return compressors
 
 
@@ -159,20 +157,16 @@ def build_client(
     cfg: Dict[str, Any],
     *,
     compressors_override: Optional[List[str]] = None,
-    treat_snappy_as_none: bool = True,
 ) -> MongoClient:
     mcfg = cfg["mongodb"]
     compressors = (
         compressors_override
         if compressors_override is not None
-        else mcfg.get("compressors")
+        else mcfg.get("network_payload_compressors_for_compression_run")
     )
     zlib_level = mcfg.get("zlib_compression_level")
 
-    # POC behavior: allow treating ["snappy"] as "no compression".
-    compressors = _normalize_compressors(
-        compressors, treat_snappy_as_none=treat_snappy_as_none
-    )
+    compressors = _normalize_compressors(compressors)
 
     kwargs: Dict[str, Any] = {}
     if compressors is not None:
@@ -349,7 +343,6 @@ def _run_phase(
     threads: int,
     phase_name: str,
     compressors_override: Optional[List[str]],
-    treat_snappy_as_none: bool,
 ) -> Dict[str, Any]:
     icfg = cfg["ingest"]
     mcfg = cfg["metrics"]
@@ -357,7 +350,6 @@ def _run_phase(
     client = build_client(
         cfg,
         compressors_override=compressors_override,
-        treat_snappy_as_none=treat_snappy_as_none,
     )
 
     mdb_cfg = cfg.get("mongodb", {})
@@ -575,13 +567,16 @@ def main() -> int:
     )
 
     if bool(icfg.get("drop_collection_first", False)):
-        client0 = build_client(cfg, compressors_override=None, treat_snappy_as_none=True)
+        client0 = build_client(cfg, compressors_override=None)
         coll0 = _make_collection(cfg, client0)
         coll0.drop()
 
     mdb = cfg["mongodb"]
     phase1_compressors = _normalize_compressors(
-        mdb.get("compressors"), treat_snappy_as_none=True
+        mdb.get("network_payload_compressors_for_compression_run")
+    )
+    phase2_compressors = _normalize_compressors(
+        mdb.get("network_payload_compressors_for_no_compression_run")
     )
 
     results_array: List[Dict[str, Any]] = []
@@ -594,11 +589,10 @@ def main() -> int:
             threads=threads,
             phase_name="compression",
             compressors_override=phase1_compressors,
-            treat_snappy_as_none=False,
         )
         results_array.append(phase1)
 
-        client_purge = build_client(cfg, compressors_override=None, treat_snappy_as_none=True)
+        client_purge = build_client(cfg, compressors_override=None)
         coll_purge = _make_collection(cfg, client_purge)
         coll_purge.drop()
 
@@ -609,8 +603,7 @@ def main() -> int:
             bytes_total_est=bytes_total,
             threads=threads,
             phase_name="no_compression",
-            compressors_override=None,
-            treat_snappy_as_none=True,
+            compressors_override=phase2_compressors,
         )
         results_array.append(phase2)
         results_array.append(_compare_results(phase1, phase2))
@@ -624,7 +617,6 @@ def main() -> int:
                 threads=threads,
                 phase_name="single_run",
                 compressors_override=phase1_compressors,
-                treat_snappy_as_none=True,
             )
         )
 
