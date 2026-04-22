@@ -13,7 +13,7 @@ mongodb:
   #
   # Optional: PyMongo wire-compression (affects network, usually not disk footprint):
   # Supported: ["snappy"], ["zlib"], ["zstd"] (depending on your client build/libs)
-  network_payload_compressors_for_compression_run: ["snappy"]
+  network_payload_compressors_for_compression_run: []
   network_payload_compressors_for_no_compression_run: []
   zlib_compression_level: 9
 

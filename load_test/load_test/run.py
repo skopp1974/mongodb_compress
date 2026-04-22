@@ -6,6 +6,7 @@ import sys
 import string
 import threading
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -137,6 +138,12 @@ def _resolve_output_path(config_path: str, output_path: str) -> str:
     if os.path.isabs(output_path):
         return output_path
     return os.path.normpath(os.path.join(os.path.dirname(config_path), output_path))
+
+def _default_report_path(config_path: str) -> str:
+    reports_dir = os.path.join(os.path.dirname(config_path), "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return os.path.join(reports_dir, f"reports_{ts}.json")
 
 
 def _normalize_compressors(
@@ -636,9 +643,12 @@ def main() -> int:
             )
         )
 
-    output_path = _resolve_output_path(
-        args.config, str(mcfg.get("output_path", "results.json"))
-    )
+    configured_output = str(mcfg.get("output_path", "results.json"))
+    if configured_output in ("results.json", "", "null"):
+        output_path = _default_report_path(args.config)
+    else:
+        output_path = _resolve_output_path(args.config, configured_output)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump({"config_path": args.config, "results": results_array}, f, indent=2, sort_keys=True)
         f.write("\n")

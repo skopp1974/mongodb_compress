@@ -1,6 +1,8 @@
 db/
 load_test/results.json
+load_test/reports/
 results.json
+results_2level_compression.json
 .venv/
 __pycache__/
 *.py[cod]
