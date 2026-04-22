@@ -13,9 +13,16 @@ cat <<'EOF'
 
 MongoDB is up.
 
+Next steps (one-time Python setup):
+  cd ~/repos/mongodb_compress
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -r load_test/requirements.txt
+
 Run the load test:
   cd ~/repos/mongodb_compress
-  source .venv/bin/activate   # if you use the repo-root venv
+  source .venv/bin/activate
+  cp -n load_test/config.example.yaml load_test/config.yaml
   python -m load_test --config config.yaml
 
 EOF
