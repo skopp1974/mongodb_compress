@@ -122,6 +122,8 @@ Or fully reclaim host disk space (runs `docker compose down`, deletes `../db/*`,
 python -m load_test.clear_db --config config.yaml --wipe-host-db-dir
 ```
 
+This may prompt for your password via `sudo` (needed if Docker socket / db files are not owned by your user).
+
 Note: even after dropping a collection/database, `du -hs ../db` may stay large because
 WiredTiger may keep preallocated space in `.wt` files. If you want the host directory to
 shrink back down, the simplest method in this repo is:

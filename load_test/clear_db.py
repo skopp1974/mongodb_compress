@@ -1,11 +1,28 @@
 import argparse
 import os
-import shutil
 import subprocess
 
 from pymongo import MongoClient
 
 from .load_test.run import build_client, load_config
+
+
+def _run(cmd: list[str], *, cwd: str) -> None:
+    """
+    Run a command; if it fails due to docker-sock permissions, retry with sudo.
+    """
+    res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if res.returncode == 0:
+        return
+
+    combined = (res.stdout or "") + (res.stderr or "")
+    needs_sudo = "permission denied while trying to connect to the docker api" in combined.lower()
+    if needs_sudo and cmd[:1] != ["sudo"]:
+        subprocess.run(["sudo", *cmd], cwd=cwd, check=True)
+        return
+
+    # Fall back to surfacing the original error.
+    raise SystemExit(combined.strip() or f"Command failed: {' '.join(cmd)}")
 
 
 def main() -> int:
@@ -52,21 +69,25 @@ def main() -> int:
             raise SystemExit(f"Expected db dir not found: {db_dir}")
 
         # Stop MongoDB container(s)
-        subprocess.run(["docker", "compose", "down"], cwd=deployment_dir, check=False)
+        _run(["docker", "compose", "down"], cwd=deployment_dir)
 
         # Delete contents of db dir, but keep the directory itself.
+        # Use sudo because container-created files may be owned by a different uid/gid.
+        # Remove via Python; fallback to `sudo rm -rf` per-path if needed.
         for name in os.listdir(db_dir):
             p = os.path.join(db_dir, name)
-            if os.path.isdir(p) and not os.path.islink(p):
-                shutil.rmtree(p)
-            else:
-                try:
+            try:
+                if os.path.isdir(p) and not os.path.islink(p):
+                    subprocess.run(["rm", "-rf", p], check=False)
+                else:
                     os.unlink(p)
-                except FileNotFoundError:
-                    pass
+            except PermissionError:
+                subprocess.run(["sudo", "rm", "-rf", p], check=False)
+            except FileNotFoundError:
+                pass
 
         # Start MongoDB again (recreates compress_poc/init via initdb scripts if db was empty)
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=deployment_dir, check=False)
+        _run(["docker", "compose", "up", "-d"], cwd=deployment_dir)
         print(f"Wiped host db dir contents: {db_dir}")
         return 0
 
