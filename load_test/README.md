@@ -110,6 +110,29 @@ Or drop the collection entirely:
 python -m load_test.clear_db --config config.yaml --drop
 ```
 
+Or drop the entire database (most aggressive):
+
+```bash
+python -m load_test.clear_db --config config.yaml --drop-db
+```
+
+Or fully reclaim host disk space (runs `docker compose down`, deletes `../db/*`, then `docker compose up -d`):
+
+```bash
+python -m load_test.clear_db --config config.yaml --wipe-host-db-dir
+```
+
+Note: even after dropping a collection/database, `du -hs ../db` may stay large because
+WiredTiger may keep preallocated space in `.wt` files. If you want the host directory to
+shrink back down, the simplest method in this repo is:
+
+```bash
+cd ../deployment
+docker compose down
+rm -rf ../db/*
+docker compose up -d
+```
+
 ## Notes
 
 - Init scripts run only when `../db/` is empty. This load test does *not* require re-init; it can drop just the target collection if configured.
