@@ -14,6 +14,7 @@ import psutil
 import yaml
 from bson import BSON
 from pymongo import MongoClient, WriteConcern
+from pymongo.errors import ServerSelectionTimeoutError
 
 
 def _now_ms() -> int:
@@ -565,6 +566,21 @@ def main() -> int:
         blob_chars=int(dcfg.get("blob_chars", 1024)),
         batch_size=batch_size,
     )
+
+    try:
+        # Fast fail if MongoDB isn't reachable.
+        build_client(cfg, compressors_override=None).admin.command("ping")
+    except ServerSelectionTimeoutError as e:
+        raise SystemExit(
+            "MongoDB is not reachable at the configured URI.\n\n"
+            f"URI: {cfg['mongodb']['uri']}\n\n"
+            "If you're using this repo's Docker setup, fix it with:\n"
+            "  cd ~/repos/mongodb_compress/deployment\n"
+            "  sudo docker compose down\n"
+            "  sudo rm -rf ../db/*\n"
+            "  sudo docker compose up -d\n\n"
+            f"Original error: {e}"
+        )
 
     if bool(icfg.get("drop_collection_first", False)):
         client0 = build_client(cfg, compressors_override=None)
